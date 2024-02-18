@@ -313,15 +313,10 @@ func WriteAnswerToFile(response GptResponse) {
 }
 
 func main() {
-	question := "What is the speed limit in Germany?"
-	load := false
-	var embeddings []Embedding
-	if load {
-		embeddings = LoadEmbeddings().Embeddings
-	} else {
-		embeddings = ConvertFileToEmbeddings("driving_license.txt")
-		SaveEmbeddings(embeddings)
-	}
+	question := "What is my brutto salary?"
+	embeddings := LoadEmbeddings().Embeddings
+	// embeddings = append(embeddings, ConvertFileToEmbeddings("Ek-Gehalt.pdf")...)
+	// SaveEmbeddings(embeddings)
 	embeddingDistances := GetEmbeddingDistances(question, embeddings)
 	context := GetContext(embeddingDistances, 2)
 	var response GptResponse = CallChatgptWithContext(question, context)
