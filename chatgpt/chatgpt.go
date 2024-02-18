@@ -2,22 +2,27 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"encoding/json"
 
+	"github.com/dslipak/pdf"
 	"github.com/go-resty/resty/v2"
 	"gopkg.in/yaml.v2"
 )
 
 const (
-	apiEndpoint = "https://api.openai.com/v1/chat/completions"
+	apiEndpointChat   = "https://api.openai.com/v1/chat/completions"
+	apiEndpointEmbedd = "https://api.openai.com/v1/embeddings"
+	embeddingsPath    = "embeddings.json"
 )
 
 type Config struct {
@@ -51,8 +56,8 @@ type Message struct {
 }
 
 type Embedding struct {
-	Created  time.Time
 	File     string
+	Created  time.Time
 	RowStart int
 	RowEnd   int
 	Vector   []float64
@@ -61,25 +66,7 @@ type Embedding struct {
 
 type Embeddings struct {
 	Created    time.Time
-	Updated    time.Time
 	Embeddings []Embedding
-}
-
-func BuildEmbedding(
-	embeddingResponse EmbeddingResponse,
-	content string,
-	file string,
-	rowStart int,
-	rowEnd int,
-) Embedding {
-	return Embedding{
-		Created:  time.Now(),
-		File:     "embeddings.json",
-		RowStart: rowStart,
-		RowEnd:   rowEnd,
-		Vector:   embeddingResponse.Data[0].Embedding,
-		Content:  content,
-	}
 }
 
 func GetOpenAiKey() string {
@@ -105,10 +92,10 @@ func CallEmbedding(message string) EmbeddingResponse {
 		SetAuthToken(GetOpenAiKey()).
 		SetHeader("Content-Type", "application/json").
 		SetBody(map[string]interface{}{
-			"model": "text-embedding-3-small",
+			"model": "text-embedding-ada-002",
 			"input": message,
 		}).
-		Post(apiEndpoint)
+		Post(apiEndpointEmbedd)
 	if err != nil {
 		log.Fatalf("Failed to send request %v\n", err)
 	}
@@ -133,9 +120,9 @@ func CallChatgpt(message string, system_content string) GptResponse {
 				map[string]interface{}{"role": "system", "content": system_content},
 				map[string]interface{}{"role": "user", "content": message},
 			},
-			"max_tokens": 50,
+			"max_tokens": 1000,
 		}).
-		Post(apiEndpoint)
+		Post(apiEndpointChat)
 	if err != nil {
 		log.Fatalf("Failed to send request %v\n", err)
 	}
@@ -162,7 +149,8 @@ func CallChatgptWithContext(message string, context string) GptResponse {
 
 func LoadEmbeddings() Embeddings {
 	// Parse json response from file
-	jsonFile, _ := os.Open("embeddings.json")
+	jsonFile, _ := os.Open(embeddingsPath)
+	defer jsonFile.Close()
 	byteContent, _ := io.ReadAll(jsonFile)
 	var parsedResponse Embeddings
 	json.Unmarshal(byteContent, &parsedResponse)
@@ -184,14 +172,13 @@ func GetVectorDistance(vector1 []float64, vector2 []float64) float64 {
 	return distance
 }
 
-func GetEmbeddingDistances(question string) []EmbeddingDistance {
+func GetEmbeddingDistances(question string, embeddings []Embedding) []EmbeddingDistance {
 	// Get embedding of question
 	var embeddingResponse EmbeddingResponse = CallEmbedding(question)
 	var questionEmbedding []float64 = embeddingResponse.Data[0].Embedding
 	// Find the closest embedding to the question
-	var embeddings Embeddings = LoadEmbeddings()
 	var distances []EmbeddingDistance
-	for _, embedding := range embeddings.Embeddings {
+	for _, embedding := range embeddings {
 		distances = append(distances, EmbeddingDistance{embedding, GetVectorDistance(embedding.Vector, questionEmbedding)})
 	}
 	// Sort distances
@@ -216,24 +203,97 @@ func GetContext(embeddingDistances []EmbeddingDistance, n int) string {
 	return context
 }
 
-func ConvertFileToEmbeddings(path string) Embeddings {
-	// Convert file to embeddings
-	// Read file
+func ReadPdf(path string) string {
+	r, err := pdf.Open(path)
+	if err != nil {
+		return ""
+	}
+	var buf bytes.Buffer
+	b, err := r.GetPlainText()
+	if err != nil {
+		log.Fatalf("Could not extract text from pdf: %v\n", err)
+	}
+	buf.ReadFrom(b)
+	return buf.String()
+}
+
+func ReadText(path string) string {
+	// Read text file
 	file, err := os.Open(path)
+	defer file.Close()
 	if err != nil {
 		log.Fatalf("Failed to read file %v\n", err)
 	}
 	scanner := bufio.NewScanner(file)
-	// Split file content into embeddings
-	var embeddings Embeddings
-	embeddings.Created = time.Now()
-	embeddings.Updated = time.Now()
-	embeddings.Embeddings = []Embedding{}
-	var rowStart int = 0
-	var rowEnd int = 0
-	var lines []string
+	var content string
 	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+		content += scanner.Text() + "\n"
+	}
+	return content
+}
+
+func ReadFile(path string) string {
+	ftype := strings.Split(path, ".")[1]
+	if ftype == "pdf" {
+		content := ReadPdf(path)
+		return content
+	} else if ftype == "txt" || ftype == "md" {
+		return ReadText(path)
+	}
+	log.Fatal("File type not supported. Only pdf, txt and md are supported.")
+	return ""
+}
+
+func ConvertFileToEmbeddings(path string) []Embedding {
+	// Convert file to embeddings
+	// Read file
+	// Split file content into embeddings
+	content := ReadFile(path)
+	var embeddings []Embedding
+	var rowStart int
+	var rowEnd int
+	var lines []string = strings.Split(content, "\n")
+	for i := 0; i < len(lines); i += 200 {
+		if i-50 >= 0 {
+			rowStart = i - 50
+		} else {
+			rowStart = i
+		}
+		if i+250 <= len(lines) {
+			rowEnd = i + 250
+		} else {
+			rowEnd = len(lines)
+		}
+		contentPart := strings.Join(lines[rowStart:rowEnd], "\n")
+		var embeddingResponse EmbeddingResponse = CallEmbedding(contentPart)
+		embeddings = append(
+			embeddings,
+			Embedding{
+				File:     path,
+				Created:  time.Now(),
+				RowStart: rowStart,
+				RowEnd:   rowEnd,
+				Vector:   embeddingResponse.Data[0].Embedding,
+				Content:  contentPart,
+			},
+		)
+	}
+	return embeddings
+}
+
+func SaveEmbeddings(embeddings []Embedding) {
+	// Save embeddings to file
+	var embeddingsToSave Embeddings = Embeddings{
+		Created:    time.Now(),
+		Embeddings: embeddings,
+	}
+	embeddingsJson, err := json.Marshal(embeddingsToSave)
+	if err != nil {
+		log.Fatalf("Failed to marshal embeddings to json %v\n", err)
+	}
+	err = os.WriteFile(embeddingsPath, embeddingsJson, 0644)
+	if err != nil {
+		log.Fatalf("Failed to write embeddings to file %v\n", err)
 	}
 }
 
@@ -254,7 +314,15 @@ func WriteAnswerToFile(response GptResponse) {
 
 func main() {
 	question := "What is the speed limit in Germany?"
-	embeddingDistances := GetEmbeddingDistances(question)
+	load := false
+	var embeddings []Embedding
+	if load {
+		embeddings = LoadEmbeddings().Embeddings
+	} else {
+		embeddings = ConvertFileToEmbeddings("driving_license.txt")
+		SaveEmbeddings(embeddings)
+	}
+	embeddingDistances := GetEmbeddingDistances(question, embeddings)
 	context := GetContext(embeddingDistances, 2)
 	var response GptResponse = CallChatgptWithContext(question, context)
 	WriteAnswerToFile(response)
