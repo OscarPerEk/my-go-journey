@@ -9,3 +9,5 @@ This tool extends ChatGpt Api such that you can load any file, folder of website
 5. Start chatting: `chatgpt "your chat message goes here"`
 
 ![example](./example.png)
+
+![image](https://github.com/OscarPerEk/my-go-journey/assets/158840780/5093c4b2-43c2-4cbf-a1e8-c7d7a710532b)
