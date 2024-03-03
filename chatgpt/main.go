@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"encoding/base64"
 	"encoding/json"
 
 	"github.com/dslipak/pdf"
@@ -22,11 +23,28 @@ import (
 )
 
 const (
-	apiEndpointChat   = "https://api.openai.com/v1/chat/completions"
-	apiEndpointEmbedd = "https://api.openai.com/v1/embeddings"
-	model             = "gpt-3.5-turbo"
+	apiEndpointChat  = "https://api.openai.com/v1/chat/completions"
+	apiEndpointEmbed = "https://api.openai.com/v1/embeddings"
+	modelChat        = "gpt-3.5-turbo"
+	modelEmbed       = "text-embedding-ada-002"
+	modelVision      = "gpt-4-vision-preview"
 )
 
+// The api key should be saved in a text file in the user's home directory
+func getAPIKey() string {
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatalf("Error getting user's home directory: %v", err)
+	}
+	filePath := filepath.Join(usr.HomeDir, ".api_key.txt")
+	apiKeyBytes, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Fatalf("Failed to read api key %v\n", err)
+	}
+	return string(apiKeyBytes)
+}
+
+// The embeddings are saved in a json file in the user's home directory
 func getEmbeddingsPath() string {
 	usr, err := user.Current()
 	if err != nil {
@@ -36,6 +54,7 @@ func getEmbeddingsPath() string {
 	return filePath
 }
 
+// The chatgpt answer is saved in a markdown file in the user's home directory
 func getAnswerPath() string {
 	usr, err := user.Current()
 	if err != nil {
@@ -49,20 +68,13 @@ type Config struct {
 	Key string `yaml:"openai_api_key"`
 }
 
+// Response of OpenAI text completion API
 type GptResponse struct {
 	Id      string   `json:"id"`
 	Object  string   `json:"object"`
 	Created string   `json:"created"`
 	Model   string   `json:"model"`
 	Choices []Choice `json:"choices"` // list of answers/choices
-}
-
-type EmbeddingResponse struct {
-	Data []struct {
-		Embedding []float64 `json:"embedding"`
-	} `json:"data"`
-	Model string         `json:"model"`
-	Usage map[string]int `json:"usage"`
 }
 
 type Choice struct {
@@ -73,6 +85,15 @@ type Choice struct {
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"` // answer
+}
+
+// Response of OpenAI text embedding API
+type EmbeddingResponse struct {
+	Data []struct {
+		Embedding []float64 `json:"embedding"`
+	} `json:"data"`
+	Model string         `json:"model"`
+	Usage map[string]int `json:"usage"`
 }
 
 type Embedding struct {
@@ -89,57 +110,38 @@ type Embeddings struct {
 	Embeddings []Embedding
 }
 
-func GetOpenAiKey() string {
-	// Read api key from yaml
-	// binaryPath, err := os.Executable()
-	// if err != nil {
-	// 	log.Fatalf("Failed to get binary path %v\n", err)
-	// }
-	// yamlPath := filepath.Join(filepath.Dir(binaryPath), "config.yaml")
-	// yamlPath := filepath.Join(filepath.Dir("."), "config.yaml")
-	// yamlContent, err := os.ReadFile(yamlPath)
-	// if err != nil {
-	// 	log.Fatalf("Failed to read yaml %v\n", err)
-	// }
-	// var config Config
-	// err = yaml.Unmarshal(yamlContent, &config)
-	// if err != nil {
-	// 	log.Fatalf("Failed to unmarschal yaml %v\n", err)
-	// }
-	// return config.Key
-	return ReadAPIKey()
-}
-
+// Call embedding from OpenAI API
 func CallEmbedding(message string) EmbeddingResponse {
-	// Call OpenAI API
 	fmt.Println("Calling Embedding API")
 	client := resty.New()
 	response, err := client.R().
-		SetAuthToken(GetOpenAiKey()).
+		SetAuthToken(getAPIKey()).
 		SetHeader("Content-Type", "application/json").
 		SetBody(map[string]interface{}{
-			"model": "text-embedding-ada-002",
+			"model": modelEmbed,
 			"input": message,
 		}).
-		Post(apiEndpointEmbedd)
+		Post(apiEndpointEmbed)
 	if err != nil {
 		log.Fatalf("Failed to send request %v\n", err)
 	}
-
 	var parsedResponse EmbeddingResponse
 	json.Unmarshal(response.Body(), &parsedResponse)
 	return parsedResponse
 }
 
+// Call text completion from OpenAI API
+// The system_content is the context of the question
+// for example, the content of the file where the question is found
+// or instructions on how ChatGPT should answer the question
 func CallChatgpt(message string, system_content string) GptResponse {
-	// Call OpenAI API
 	fmt.Println("Calling ChatGpt API")
 	client := resty.New()
 	response, err := client.R().
-		SetAuthToken(GetOpenAiKey()).
+		SetAuthToken(getAPIKey()).
 		SetHeader("Content-Type", "application/json").
 		SetBody(map[string]interface{}{
-			"model": model,
+			"model": modelChat,
 			"messages": []interface{}{
 				map[string]interface{}{"role": "system", "content": system_content},
 				map[string]interface{}{"role": "user", "content": message},
@@ -155,11 +157,7 @@ func CallChatgpt(message string, system_content string) GptResponse {
 	return parsed_response
 }
 
-func CallChatgptWithoutContext(message string) GptResponse {
-	system_content := "You are an helpful assistant. Your job is to answer the user's questions."
-	return CallChatgpt(message, system_content)
-}
-
+// Helper function that tells ChatGPT to answer a question based on a context
 func CallChatgptWithContext(message string, context string) GptResponse {
 	system_content := "Based on the context provided, your job is to first cite the relevant" +
 		"answer found in context. Explicitly state in which file the answer is found. Then summarize" +
@@ -168,8 +166,8 @@ func CallChatgptWithContext(message string, context string) GptResponse {
 	return CallChatgpt(message, system_content)
 }
 
+// Load embeddings from embeddings.json file in the user's home directory
 func LoadEmbeddings() Embeddings {
-	// Parse json response from file
 	jsonFile, _ := os.Open(getEmbeddingsPath())
 	defer jsonFile.Close()
 	byteContent, _ := io.ReadAll(jsonFile)
@@ -183,8 +181,8 @@ type EmbeddingDistance struct {
 	Distance  float64
 }
 
+// L2 norm
 func GetVectorDistance(vector1 []float64, vector2 []float64) float64 {
-	// Calculate the distance between two vectors
 	var distance float64
 	for i := 0; i < len(vector1); i++ {
 		distance += (vector1[i] - vector2[i]) * (vector1[i] - vector2[i])
@@ -192,26 +190,25 @@ func GetVectorDistance(vector1 []float64, vector2 []float64) float64 {
 	return distance
 }
 
+// Sort list of embeddings by distance to the question
 func GetEmbeddingDistances(question string, embeddings []Embedding) []EmbeddingDistance {
-	// Get embedding of question
 	var embeddingResponse EmbeddingResponse = CallEmbedding(question)
 	var questionEmbedding []float64 = embeddingResponse.Data[0].Embedding
-	// Find the closest embedding to the question
 	var distances []EmbeddingDistance
 	for _, embedding := range embeddings {
 		distances = append(distances, EmbeddingDistance{embedding, GetVectorDistance(embedding.Vector, questionEmbedding)})
 	}
-	// Sort distances
 	sort.Slice(distances, func(i, j int) bool {
 		return distances[i].Distance < distances[j].Distance
 	})
 	return distances
 }
 
+// Turn list of embeddings into a context string
 func GetContext(embeddingDistances []EmbeddingDistance, n int) string {
-	// Get the context of the n closest embeddings
 	var context string
-	for i := 0; i < n; i++ {
+	N := min(len(embeddingDistances), n)
+	for i := 0; i < N; i++ {
 		context += fmt.Sprintf(
 			"File: %s\nContent from row %v to row %v:\n%v",
 			embeddingDistances[i].Embedding.File,
@@ -238,12 +235,12 @@ func ReadPdf(path string) string {
 }
 
 func ReadText(path string) string {
-	// Read text file
 	file, err := os.Open(path)
-	defer file.Close()
 	if err != nil {
 		log.Fatalf("Failed to read file %v\n", err)
+		return ""
 	}
+	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	var content string
 	for scanner.Scan() {
@@ -273,13 +270,13 @@ func ReadFile(path string) string {
 	return ReadText(path)
 }
 
+// Convert a file to embeddings by reading the file to string,
+// then splitting the text into chunks of 200 lines
+// and then calling the OpenAI text embedding API
 func ConvertFileToEmbeddings(path string) ([]Embedding, error) {
-	// Convert file to embeddings
-	// Read file
-	// Split file content into embeddings
 	content := ReadFile(path)
 	if strings.Contains(content, "#protected") {
-		return nil, fmt.Errorf("File is protected")
+		return nil, fmt.Errorf("file is protected")
 	}
 	var embeddings []Embedding
 	var rowStart int
@@ -315,8 +312,8 @@ func ConvertFileToEmbeddings(path string) ([]Embedding, error) {
 	return embeddings, nil
 }
 
+// Save embeddings to embeddings.json file in the user's home directory
 func SaveEmbeddings(embeddings []Embedding) {
-	// Save embeddings to file
 	var embeddingsToSave Embeddings = Embeddings{
 		Created:    time.Now(),
 		Embeddings: embeddings,
@@ -333,7 +330,7 @@ func SaveEmbeddings(embeddings []Embedding) {
 
 func WriteAnswerToFile(response GptResponse, embedding Embedding) {
 	// Write answer to file
-	answer := "# Answer from " + model + "\n\n" + response.Choices[0].Message.Content +
+	answer := "# Answer from " + modelChat + "\n\n" + response.Choices[0].Message.Content +
 		"\n\n# Matched Context: \nFile: " + embedding.File +
 		"\nRow Start: " + fmt.Sprintf("%v", embedding.RowStart) +
 		"\nRow End: " + fmt.Sprintf("%v", embedding.RowEnd) +
@@ -349,13 +346,13 @@ func WriteAnswerToFile(response GptResponse, embedding Embedding) {
 	}
 }
 
-func EmbeddFile(path string, embeddingsChannel chan []Embedding) {
+// Helper function that tries to convert file to embeddings
+// and sends the embeddings to the embeddings channel.
+// It prints a success or fail message to the console.
+func EmbedFile(path string, embeddingsChannel chan []Embedding) {
 	fmt.Println("\nFound file: ", path)
 	fmt.Println("\nCreating new embedding: ", path)
 	newEmbeddings, err := ConvertFileToEmbeddings(path)
-	// var err error = nil
-	// var newEmbeddings []Embedding = []Embedding{}
-
 	if err != nil {
 		fmt.Printf("\nFailed to create embedding: %v\n: %v\n", path, err)
 	} else {
@@ -364,13 +361,16 @@ func EmbeddFile(path string, embeddingsChannel chan []Embedding) {
 	}
 }
 
-func EmbeddFolder(path string, wg *sync.WaitGroup, embeddingsChannel chan []Embedding) {
-	// Get information about the file or directory
+// Checks if path is a website, file or folder. Then embedds its content.
+// If folder, we recursively embed all files in the folder.
+// Each file is embedded in a separate go routine.
+func EmbedAnything(path string, wg *sync.WaitGroup, embeddingsChannel chan []Embedding) {
+	// website
 	if strings.Contains(path, "https:") {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			EmbeddFile(path, embeddingsChannel)
+			EmbedFile(path, embeddingsChannel)
 		}()
 		return
 	}
@@ -378,12 +378,14 @@ func EmbeddFolder(path string, wg *sync.WaitGroup, embeddingsChannel chan []Embe
 	if err != nil {
 		fmt.Println("Error:", err)
 	} else if fileInfo.Mode().IsRegular() {
+		// file
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			EmbeddFile(path, embeddingsChannel)
+			EmbedFile(path, embeddingsChannel)
 		}()
 	} else if fileInfo.Mode().IsDir() {
+		// folder
 		fmt.Println("Found folder")
 		fmt.Println(path, "is a directory.")
 
@@ -398,15 +400,17 @@ func EmbeddFolder(path string, wg *sync.WaitGroup, embeddingsChannel chan []Embe
 		}
 		for _, fileInfo := range fileInfos {
 			p := filepath.Join(path, fileInfo.Name())
-			EmbeddFolder(p, wg, embeddingsChannel)
+			EmbedAnything(p, wg, embeddingsChannel)
 		}
 	}
 }
 
+// Starting point for creating embeddings from a path.
+// The embeddings are saved to the user's home directory.
 func StartEmbedding(path string) {
 	var wg sync.WaitGroup
 	var embeddingsChannel chan []Embedding = make(chan []Embedding)
-	EmbeddFolder(
+	EmbedAnything(
 		path,
 		&wg,
 		embeddingsChannel,
@@ -427,28 +431,19 @@ func StartEmbedding(path string) {
 	SaveEmbeddings(embeddings)
 }
 
+// Starting point for asking ChatGPT a question based
+// on the best matching context from embeddings
+// saved in the user's home directory.
 func StartChat(question string) {
 	var embeddings []Embedding = LoadEmbeddings().Embeddings
 	var embeddingDistances []EmbeddingDistance = GetEmbeddingDistances(question, embeddings)
 	var context string = GetContext(embeddingDistances, 2)
 	var response GptResponse = CallChatgptWithContext(question, context)
-	fmt.Printf("Answer from %v \n\n%v", model, response.Choices[0].Message.Content)
+	fmt.Printf("Answer from %v \n\n%v", modelChat, response.Choices[0].Message.Content)
 	WriteAnswerToFile(response, embeddingDistances[0].Embedding)
 }
 
-func ReadAPIKey() string {
-	usr, err := user.Current()
-	if err != nil {
-		log.Fatalf("Error getting user's home directory: %v", err)
-	}
-	filePath := filepath.Join(usr.HomeDir, ".api_key.txt")
-	apiKeyBytes, err := os.ReadFile(filePath)
-	if err != nil {
-		log.Fatalf("Failed to read api key %v\n", err)
-	}
-	return string(apiKeyBytes)
-}
-
+// Save the API key to a text file in the user's home directory
 func WriteAPIKey(apiKey string) {
 	usr, err := user.Current()
 	if err != nil {
@@ -461,15 +456,91 @@ func WriteAPIKey(apiKey string) {
 	}
 }
 
+// Response of OpenAI vision API
+type Usage struct {
+	PromtTokens      int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+type VisionResponse struct {
+	Id      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created string   `json:"created"`
+	Model   string   `json:"model"`
+	Usage   Usage    `json:"usage"`
+	Choices []Choice `json:"choices"`
+}
+
+// Encode image to base64
+func encodeImage(image_path string) string {
+	file, err := os.Open(image_path)
+	if err != nil {
+		log.Fatalf("Failed to open file %v\n", err)
+	}
+	defer file.Close()
+	fs, _ := file.Stat()
+	size := fs.Size()
+	buffer := make([]byte, size)
+	file.Read(buffer)
+	str := base64.StdEncoding.EncodeToString(buffer)
+	return str
+}
+
+// Ask a question about an image by calling the vision API
+func CallVisionApi(question string, image_path string) VisionResponse {
+	fmt.Println("Calling vision API")
+	client := resty.New()
+	response, err := client.R().
+		SetAuthToken(getAPIKey()).
+		SetHeader("Content-Type", "application/json").
+		SetBody(map[string]interface{}{
+			"model": modelVision,
+			"messages": []map[string]interface{}{
+				{
+					"role": "user",
+					"content": []map[string]interface{}{
+						{"type": "text", "text": question},
+						{"type": "image_url", "image_url": map[string]string{
+							// "url": "data:image/jpeg;base64," + encodeImage(image_path),
+							"url": "data:image/png;base64," + encodeImage(image_path),
+						}},
+					},
+				},
+			},
+			"max_tokens": 1000,
+		}).
+		Post(apiEndpointChat)
+	if err != nil {
+		log.Fatalf("Failed to send request %v\n", err)
+	}
+	var parsed_response VisionResponse
+	json.Unmarshal(response.Body(), &parsed_response)
+	return parsed_response
+}
+
+func StartVision(image_path string) {
+	var question string = "Read the text in the image. Extract the word being defined and its definition. If possible also a example of how its used."
+	var response VisionResponse = CallVisionApi(question, image_path)
+	fmt.Printf("%#v\n", response)
+}
+
+// Parse user input and either:
+// 1. Add an api key to the system with flag --key
+// 2. Embedd a file or folder with flag --embed
+// 3. Ask ChatGPT a question
 func main() {
-	var embeddPath string
+	var embedPath string
+	var visionPath string
 	var apiKey string
-	flag.StringVar(&embeddPath, "embedd", "", "Embedd a file or folder")
+	flag.StringVar(&embedPath, "embed", "", "Embedd a file or folder")
+	flag.StringVar(&visionPath, "vision", "", "Extract text from picture")
 	flag.StringVar(&apiKey, "key", "", "Add an api key to the system")
 	flag.Parse()
 	args := flag.Args()
-	if embeddPath != "" {
-		StartEmbedding(embeddPath)
+	if embedPath != "" {
+		StartEmbedding(embedPath)
+	} else if visionPath != "" {
+		StartVision(visionPath)
 	} else if apiKey != "" {
 		WriteAPIKey(apiKey)
 	} else {
